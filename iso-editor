@@ -1,0 +1,114 @@
+#!/bin/bash
+set -e
+show_help() {
+   cat <<HERE
+usage: $(basename "$0") <path to iso to edit>
+
+Mounts the iso to a writeable location then pauses while you edit
+the data.
+
+Press <ctrl-C> at this point to abort without generating an ISO.
+
+After edits are complete, press <return> to generate a new ISO
+in the current directory from the edited data.
+
+Rather than extract the ISO this script mounts the ISO as the lower
+layer of an overlay filesystem to allow edit while minimising disk
+space requirements.
+HERE
+}
+error() { echo "ERROR: $*">&2; exit 1; }
+
+[ $# -eq 0 ] || [ "$1" = "-h" ] && { show_help; exit 0; }
+[ -f "$1" ] || error "$1 is an invalid filename."
+
+command -v xorriso >/dev/null ||
+   error "ISO generation requires xorriso.  Please install."
+command -v grub-mkrescue >/dev/null ||
+   error "ISO generation requires grub-mkrescue.  Please install."
+
+# Fixed $tmpd as do not support multiple copies running at once.
+tmpd=/tmp/iso-editor
+lowerdir=${tmpd}/lower
+upperdir=${tmpd}/overlay/upper
+workdir=${tmpd}/overlay/work
+mountpoint=${tmpd}/iso_mnt
+
+outfile=$(basename "$1").edited.iso
+
+# Print PIDs of processes accessing $1 as a space separated list.
+# Like lsof, returns success if processes found, else failure.
+_lsof() # <path>
+{
+   local PIDs
+   PIDs=$(lsof "$1" | awk 'NR>1 {printf("%s ",$2)}')
+   echo "$PIDs"
+   [ -n "$PIDs" ]
+}
+
+loop_until_dir_unused() # <dir to test>
+{
+   local PIDs
+   while PIDs=$(_lsof "$1"); do
+      echo "waiting for processes $PIDs to stop accessing $1 before umount" >&2
+      sleep 1
+   done
+}
+
+loop_until_umount() # <mount point to wait for>
+{
+   while mount |grep -q " $1 "; do
+      echo "waiting for umount $1 to complete" >&2
+      sleep 1
+   done
+}
+
+cleanup_on_exit(){
+   set +e   # All commands must be attempted.
+
+   loop_until_dir_unused "$mountpoint"
+   echo umount $mountpoint >&2
+   sudo umount "$mountpoint"
+   loop_until_umount "$mountpoint"
+
+   loop_until_dir_unused "$lowerdir"
+   echo umount $lowerdir >&2
+   sudo umount "$lowerdir"
+   loop_until_umount "$lowerdir"
+
+   sudo rm -rf ${upperdir}/*
+   rm -rf "$tmpd"
+}
+trap cleanup_on_exit EXIT
+
+mkdir "$tmpd" ||
+   error "Only one copy of iso-editor is expected to be run at a time."
+for dir in $lowerdir $upperdir $workdir $mountpoint; do
+   mkdir -p "$dir" || error "failed to mkdir $dir"
+done
+
+# Mount iso as lower layer of overlayfs.
+sudo mount -t iso9660 -o ro,loop "$1" "$lowerdir"
+
+# Mount overlayfs
+sudo mount overlay -t overlay \
+   -o lowerdir=$lowerdir,upperdir=$upperdir,workdir=$workdir \
+   "$mountpoint"
+
+# Now ready for edits.
+cat <<MESSAGE
+ISO data is mounted to:
+   $mountpoint
+Edit data as desired and once done, press <Return> to build ISO from the edited data.
+Press <ctrl>-C to abandon the operation.
+MESSAGE
+# shellcheck disable=SC2034
+read -r discard_me
+
+# N.B. A standard ISO, such as is made by genisoimage, is not bootable,
+# so must use xorriso with appropriate parameters. grub-mkrescue wraps xorriso
+# and knows the correct parameters.
+echo "generating $outfile ..."
+grub-mkrescue -o "$outfile" ${mountpoint}/
+
+echo "Generation of $outfile successful."
