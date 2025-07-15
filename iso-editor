@@ -1,8 +1,10 @@
 #!/bin/bash
 set -e
+version=0.9.0
 show_help() {
    cat <<HERE
 usage: $(basename "$0") <path to iso to edit>
+version: $version
 
 Mounts the iso to a writeable location then pauses while you edit
 the data.
@@ -20,6 +22,7 @@ HERE
 error() { echo "ERROR: $*">&2; exit 1; }
 
 [ $# -eq 0 ] || [ "$1" = "-h" ] && { show_help; exit 0; }
+[ "$1" = "-v" ] && { echo "$version"; exit 0; }
 [ -f "$1" ] || error "$1 is an invalid filename."
 
 command -v xorriso >/dev/null ||
